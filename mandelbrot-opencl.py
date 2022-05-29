@@ -109,6 +109,64 @@ def isPointInSetArray(xArray, yArray, maxIterations):
     pyopencl.enqueue_copy(queue, iterationses, iterationsesCL)
     return iterationses
 
+def isPointInSetGenerated(worldDimensionsX, worldDimensionsY, imageSize, maxIterations, workGroupSize):
+    iterationsesArray = numpy.zeros(imageSize, dtype=numpy.int32)
+
+    ctx = pyopencl.create_some_context()
+    queue = pyopencl.CommandQueue(ctx)
+
+    mf = pyopencl.mem_flags
+    iterationsesCL = pyopencl.Buffer(ctx, mf.WRITE_ONLY, iterationsesArray.nbytes)
+
+    prg = pyopencl.Program(ctx, """
+        #define PYOPENCL_DEFINE_CDOUBLE 1
+        #include <pyopencl-complex.h>
+        __kernel void multiply(
+            double worldDimensionsX,
+            double worldDimensionsY,
+            double stepSizeX,
+            double stepSizeY,
+            ushort imageSizeX,
+            ushort imageSizeY,
+            ushort maxIterations,
+            __global int *iterationses
+        ) {
+            int xIdx = get_local_id(0)+get_group_id(0)*get_local_size(0);
+            int yIdx = get_local_id(1)+get_group_id(1)*get_local_size(1);
+            int gid = yIdx + imageSizeY*xIdx;
+        
+            cdouble_t point;
+            point.real = worldDimensionsX + (xIdx * stepSizeX);
+            point.imag = worldDimensionsY + (yIdx * stepSizeY);
+            cdouble_t z;
+            z.real = point.real;
+            z.imag = point.imag;
+            int i;
+            iterationses[gid] = 0;
+            for (i = 0; i < maxIterations; i++) {
+                z = cdouble_add(cdouble_mul(z, z), point);
+                if (cdouble_abs(z) >= 2) {
+                    iterationses[gid] = i + 1;
+                    break;
+                }
+            }
+        }
+    """).build()
+
+    prg.multiply(queue, iterationsesArray.shape, workGroupSize,
+                numpy.double(worldDimensionsX[0]),
+                numpy.double(worldDimensionsY[0]),
+                numpy.double((worldDimensionsX[1] - worldDimensionsX[0]) / imageSize[0]),
+                numpy.double((worldDimensionsY[1] - worldDimensionsY[0]) / imageSize[1]),
+                numpy.uint16(imageSize[0]),
+                numpy.uint16(imageSize[1]),
+                numpy.uint16(maxIterations),
+                iterationsesCL)
+
+    iterationses = numpy.empty_like(iterationsesArray)
+    pyopencl.enqueue_copy(queue, iterationses, iterationsesCL)
+    return iterationses
+
 def isPointInSetMatrix(xMatrix, yMatrix, maxIterations):
     iterationsesArray = numpy.zeros(xMatrix.shape, dtype=numpy.int32)
     xMatrix = xMatrix.astype(numpy.double)
@@ -164,15 +222,15 @@ def isPointInSetMatrix(xMatrix, yMatrix, maxIterations):
     return iterationses
 
 
-def renderSetMatrix(imageNumber, imageBuffer, imageSize, maxIterations, worldDimensionsX, worldDimensionsY):
+def renderSetMatrix(imageNumber, imageBuffer, imageSize, maxIterations, worldDimensionsX, worldDimensionsY, workGroupSize):
     startTime = time.process_time()
     pointCount = 0
     pointTotalCount = 0
     iterationTotalCount = 0
     imageX = 0
-    print('assembling the matrix')
-    matrixX = [[x for y in linspace(worldDimensionsY[0], worldDimensionsY[1], imageSize[1], endpoint=False)] for x in linspace(worldDimensionsX[0], worldDimensionsX[1], imageSize[0], endpoint=False)]
-    matrixY = [[y for y in linspace(worldDimensionsY[0], worldDimensionsY[1], imageSize[1], endpoint=False)] for x in linspace(worldDimensionsX[0], worldDimensionsX[1], imageSize[0], endpoint=False)]
+    #print('assembling the matrix')
+    #matrixX = [[x for y in linspace(worldDimensionsY[0], worldDimensionsY[1], imageSize[1], endpoint=False)] for x in linspace(worldDimensionsX[0], worldDimensionsX[1], imageSize[0], endpoint=False)]
+    #matrixY = [[y for y in linspace(worldDimensionsY[0], worldDimensionsY[1], imageSize[1], endpoint=False)] for x in linspace(worldDimensionsX[0], worldDimensionsX[1], imageSize[0], endpoint=False)]
 #    for x in linspace(worldDimensionsX[0], worldDimensionsX[1], imageSize[0], endpoint=False):
 #        xCol = []
 #        yCol = []
@@ -182,15 +240,16 @@ def renderSetMatrix(imageNumber, imageBuffer, imageSize, maxIterations, worldDim
 #        matrixX.append(xCol)
 #        matrixY.append(yCol)
         
-    xMatrix = numpy.array(matrixX, dtype=numpy.double)
-    yMatrix = numpy.array(matrixY, dtype=numpy.double)
-    endTime = time.process_time()
-    runTime = endTime - startTime
-    print('matrix assembled in ' + str(runTime) + 's')
+    #xMatrix = numpy.array(matrixX, dtype=numpy.double)
+    #yMatrix = numpy.array(matrixY, dtype=numpy.double)
+    #endTime = time.process_time()
+    #runTime = endTime - startTime
+    #print('matrix assembled in ' + str(runTime) + 's')
 
     startTime = time.process_time()
     print('sending the matrix')
-    iterationses = isPointInSetMatrix(xMatrix, yMatrix, maxIterations)
+    #iterationses = isPointInSetMatrix(xMatrix, yMatrix, maxIterations)
+    iterationses = isPointInSetGenerated(worldDimensionsX, worldDimensionsY, imageSize, maxIterations, workGroupSize)
     print('matrix received')
     for imageX, iterationsX in enumerate(iterationses):
         for imageY, iterations in enumerate(iterationsX):
@@ -266,11 +325,11 @@ def renderSet(imageNumber, imageBuffer, imageSize, maxIterations, worldDimension
 
     return iterationTotalCount
 
-def renderNewSet(imageNumber, imageResults, imageSize, maxIterations, worldDimensionsX, worldDimensionsY):
+def renderNewSet(imageNumber, imageResults, imageSize, maxIterations, worldDimensionsX, worldDimensionsY, workGroupSize):
     start = time.process_time()
-    print(str(imageNumber) + ': render thread', imageNumber, 'processing image of size', imageSize, 'of coordinates from', worldDimensionsX, 'to', worldDimensionsY, 'with max iterations', maxIterations)
+    print(str(imageNumber) + ': render thread', imageNumber, 'processing image of size', imageSize, 'with workers of size', workGroupSize, 'of coordinates from', worldDimensionsX, 'to', worldDimensionsY, 'with max iterations', maxIterations)
     imageBuffer = createImageBuffer(imageSize)
-    iterationCount = renderSetMatrix(imageNumber, imageBuffer, imageSize, maxIterations, worldDimensionsX, worldDimensionsY)
+    iterationCount = renderSetMatrix(imageNumber, imageBuffer, imageSize, maxIterations, worldDimensionsX, worldDimensionsY, workGroupSize)
     #imageResults.put((imageNumber, imageBuffer))
     imageResults[imageNumber] = (imageBuffer, iterationCount)
     end = time.process_time()
@@ -291,7 +350,7 @@ def renderNewSet(imageNumber, imageResults, imageSize, maxIterations, worldDimen
     #pyplot.imsave('fig.png', imageBuffer)
     #return imageBuffer
 
-def renderParallelSet(imageSize, threadSize, maxIterations, worldDimensionsX, worldDimensionsY):
+def renderParallelSet(imageSize, threadSize, maxIterations, worldDimensionsX, worldDimensionsY, workGroupSize):
     startTime = time.time()
     chunkSize = (int(imageSize / threadSize[0]), int(imageSize / threadSize[1]))
     threads = []
@@ -314,7 +373,8 @@ def renderParallelSet(imageSize, threadSize, maxIterations, worldDimensionsX, wo
                     chunkSize,
                     maxIterations,
                     (x, x + ((worldDimensionsX[1] - worldDimensionsX[0]) / threadSize[0])),
-                    (y, y + ((worldDimensionsY[1] - worldDimensionsY[0]) / threadSize[1]))
+                    (y, y + ((worldDimensionsY[1] - worldDimensionsY[0]) / threadSize[1])),
+                    workGroupSize
                 )
             )
             threads.append(thread)
@@ -377,6 +437,8 @@ def renderParallelSet(imageSize, threadSize, maxIterations, worldDimensionsX, wo
 if __name__ == '__main__':
     imageSize = 1200
     threadSize = (2, 2)
+    workGroupImageSize = 75
+    workGroupSize = (int((imageSize / threadSize[0]) / workGroupImageSize), int((imageSize / threadSize[1]) / workGroupImageSize))
 
     #imageZoom = int(floor(3000 / imageSize))
 
@@ -396,22 +458,28 @@ if __name__ == '__main__':
     #worldSize = mpf('0.0000000000001') #radius
     #maxIterations = 4500
 
-    centerCoordinate = (mpf('-0.7570126264005'), mpf('0.0620842044993'))
+    #GPU Zoom 1
+    #centerCoordinate = (mpf('-0.7570126264005'), mpf('0.0620842044993'))
+    #Gpu Zoom 2
+    #centerCoordinate = (mpf('-1.9414546650019524'), mpf('-0.0057152970004928508'))
+    centerCoordinate = (mpf('0.253270382'), mpf('-0.00029617488476434698'))
 
     #worldSize = mpf('0.0000000000001') #radius
     #worldSizeTarget = mpf('1') #radius
     #worldSizeStart = mpf('2') #radius
-    worldSizeTarget = mpf('0.0000000000001') #radius
+    #worldSizeTarget = mpf('0.00000000000001') #radius
+    worldSizeTarget = mpf('0.000000000000001') #radius
     #worldSizeStart = mpf('4.4721359549995798e-7') #radius
     worldSizeStart = mpf('2') #radius
     #worldSizeStart = mpf('0.0033873321941200185')
     #worldSizeTarget = mpf('0.01') #radius
     #worldSizeStart = mpf('0.01') #radius
-    maxIterations = 4500
+    maxIterations = 8000
     minIterations = 40
-    crashIterations = 2570
-
+    crashIterations = 0#maxIterations - 100
     totalIterations = maxIterations - minIterations
+    onlyEvery = 0
+
     skipIterations = (totalIterations - (crashIterations - minIterations)) / 5
     worldSizes = []
 
@@ -425,15 +493,16 @@ if __name__ == '__main__':
             iterations += 1
             iterationCount += 1
             if (iterationCount > skipIterations):
-                print('renderParallelSet(', imageSize, threadSize, iterations, worldDimensionsX, worldDimensionsY)
+                print('renderParallelSet(', imageSize, threadSize, iterations, worldDimensionsX, worldDimensionsY, workGroupSize)
                 print('skipping, to resume at crash iterations ' + str(crashIterations))
                 iterationCount = 0
             continue
-        print('renderParallelSet(', imageSize, threadSize, iterations, worldDimensionsX, worldDimensionsY)
-        imageBuffer = renderParallelSet(imageSize, threadSize, iterations, worldDimensionsX, worldDimensionsY)
+        if (onlyEvery == 0 or (iterations % onlyEvery == 0)):
+            print('renderParallelSet(', imageSize, threadSize, iterations, worldDimensionsX, worldDimensionsY, workGroupSize)
+            imageBuffer = renderParallelSet(imageSize, threadSize, iterations, worldDimensionsX, worldDimensionsY, workGroupSize)
 
-        filename = 'C:/Users/tybrown/Projects/Mandelbrot-opencl/output' + str(iterations) + '.png'
-        print("writing to", filename)
-        Image.fromarray(numpy.rot90(numpy.array(imageBuffer, dtype=numpy.uint8))).save(filename)
+            filename = 'C:/Users/tybrown/Projects/Mandelbrot-opencl/output' + str(iterations) + '.png'
+            print("writing to", filename)
+            Image.fromarray(numpy.rot90(numpy.array(imageBuffer, dtype=numpy.uint8))).save(filename)
         iterations += 1
         iterationCount += 1
